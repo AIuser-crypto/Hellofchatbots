@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>3D Terrain with Chatbots: Follow & Fight</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+    #chatInput {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      width: 250px;
+      padding: 5px;
+      font-size: 14px;
+      z-index: 9999;
+    }
+  </style>
+</head>
+<body>
+  <input id="chatInput" type="text" placeholder="Type message and press Enter..." />
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.7/dat.gui.min.js"></script>
+  <script>
+    // Global variables
+    let scene, camera, renderer, controls;
+    let terrainGeometry, terrainMaterial, terrainMesh;
+    let chatbots = [];
+    const gravity = 0.5;
+    let lastTime = Date.now();
+
+    // General scene/graphics settings
+    const params = {
+      wireframe: false,
+      terrainHeight: 10,
+      frequency: 0.1,
+      regenerate: function() {
+        if (chatbots.length > 0) {
+          alert("Cannot change terrain while chatbots are present!");
+        } else {
+          updateTerrain();
+        }
+      },
+      resolution: "Medium", // Options: Low, Medium, High, Ultra
+      fog: false,
+      shadows: true,
+      updateResolution: function() { updateResolution(); },
+      chatbotsEnabled: false
+    };
+
+    // Combat settings
+    const combatParams = {
+      attackMode: false,
+      attackPower: 10,
+      attackRange: 15
+    };
+
+    // Chatbot behavior settings
+    const chatbotParams = {
+      meaningfulMode: true,
+      walkSpeed: 0.5,
+      jumpHeight: 10,
+      jumpInterval: 5000
+    };
+
+    // UI settings for scaling chat bubbles and health bars
+    const uiParams = {
+      chatBubbleScale: 1.0,
+      healthBarScale: 1.0
+    };
+
+    // Conversation script and bot names
+    const conversationScript = [
+      "Hello, how are you?",
+      "I'm doing well, thank you!",
+      "The terrain is fascinating today.",
+      "It's a great day for exploration.",
+      "Shall we take a walk together?",
+      "Absolutely, I'm right behind you!",
+      "Sometimes I feel like jumping to new heights.",
+      "That's an interesting thought!",
+      "Let's share more stories as we wander.",
+      "I look forward to our next adventure."
+    ];
+    let conversationIndex = 0;
+    let conversationTimer = Date.now() + 4000;
+    const BOT_NAMES = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"];
+
+    // Initialize scene
+    function init() {
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xa0a0a0);
+      if (params.fog) {
+        scene.fog = new THREE.Fog(0xa0a0a0, 50, 300);
+      }
+      scene.add(new THREE.GridHelper(200, 20));
+      scene.add(new THREE.AxesHelper(50));
+
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+      camera.position.set(50, 50, 50);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = params.shadows;
+      updateResolution();
+      document.body.appendChild(renderer.domElement);
+
+      const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444);
+      hemiLight.position.set(0, 200, 0);
+      scene.add(hemiLight);
+      const dirLight = new THREE.DirectionalLight(0xffffff);
+      dirLight.position.set(0, 200, 100);
+      dirLight.castShadow = params.shadows;
+      scene.add(dirLight);
+
+      createTerrain();
+
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 0, 0);
+      controls.update();
+
+      const gui = new dat.GUI();
+
+      const terrainFolder = gui.addFolder("Terrain Settings");
+      terrainFolder.add(params, "wireframe").onChange(value => {
+        terrainMaterial.wireframe = value;
+      });
+      terrainFolder.add(params, "terrainHeight", 1, 20).onChange(value => {
+        if (chatbots.length > 0) {
+          alert("Cannot change terrain while chatbots are present!");
+          return;
+        }
+        params.terrainHeight = value;
+        updateTerrain();
+      });
+      terrainFolder.add(params, "frequency", 0.01, 0.5).onChange(value => {
+        if (chatbots.length > 0) {
+          alert("Cannot change terrain while chatbots are present!");
+          return;
+        }
+        params.frequency = value;
+        updateTerrain();
+      });
+      terrainFolder.add(params, "regenerate").name("Regenerate Terrain");
+      terrainFolder.open();
+
+      const graphicsFolder = gui.addFolder("Graphics Settings");
+      graphicsFolder.add(params, "resolution", ["Low", "Medium", "High", "Ultra"]).onChange(() => {
+        updateResolution();
+      });
+      graphicsFolder.add(params, "fog").name("Enable Fog").onChange(value => {
+        scene.fog = value ? new THREE.Fog(0xa0a0a0, 50, 300) : null;
+      });
+      graphicsFolder.add(params, "shadows").name("Enable Shadows").onChange(value => {
+        renderer.shadowMap.enabled = value;
+      });
+      graphicsFolder.open();
+
+      const chatbotFolder = gui.addFolder("Chatbot Settings");
+      chatbotFolder.add(params, "chatbotsEnabled").name("Enable Chatbots").onChange(value => {
+        if (value) spawnChatbots();
+        else removeChatbots();
+      });
+      chatbotFolder.add(chatbotParams, "meaningfulMode").name("Meaningful Conversation");
+      chatbotFolder.add(chatbotParams, "walkSpeed", 0.1, 5).name("Walk Speed");
+      chatbotFolder.add(chatbotParams, "jumpHeight", 5, 20).name("Jump Height");
+      chatbotFolder.open();
+
+      const combatFolder = gui.addFolder("Combat Settings");
+      combatFolder.add(combatParams, "attackMode").name("Enable Attack Mode");
+      combatFolder.add(combatParams, "attackPower", 1, 50).name("Attack Power");
+      combatFolder.add(combatParams, "attackRange", 5, 50).name("Attack Range");
+      combatFolder.open();
+
+      const uiFolder = gui.addFolder("UI Settings");
+      uiFolder.add(uiParams, "chatBubbleScale", 0.5, 3).name("Chat Bubble Scale").onChange(() => {
+        updateUIScales();
+      });
+      uiFolder.add(uiParams, "healthBarScale", 0.5, 3).name("Health Bar Scale").onChange(() => {
+        updateUIScales();
+      });
+      uiFolder.open();
+
+      window.addEventListener("resize", onWindowResize, false);
+
+      const chatInput = document.getElementById("chatInput");
+      chatInput.addEventListener("keydown", e => {
+        if (e.key === "Enter") {
+          handlePlayerMessage(chatInput.value);
+          chatInput.value = "";
+        }
+      });
+    }
+
+    function createTerrain() {
+      const size = 200, segments = 100;
+      terrainGeometry = new THREE.PlaneGeometry(size, size, segments, segments);
+      terrainGeometry.rotateX(-Math.PI / 2);
+      terrainMaterial = new THREE.MeshStandardMaterial({
+        color: 0x556b2f,
+        wireframe: params.wireframe
+      });
+      terrainMesh = new THREE.Mesh(terrainGeometry, terrainMaterial);
+      terrainMesh.receiveShadow = true;
+      scene.add(terrainMesh);
+      updateTerrain();
+    }
+
+    function updateTerrain() {
+      if (chatbots.length > 0) {
+        alert("Cannot change terrain while chatbots are present!");
+        return;
+      }
+      const positions = terrainGeometry.attributes.position;
+      for (let i = 0; i < positions.count; i++) {
+        const x = positions.getX(i);
+        const z = positions.getZ(i);
+        const y = Math.sin(x * params.frequency) * Math.cos(z * params.frequency) * params.terrainHeight;
+        positions.setY(i, y);
+      }
+      positions.needsUpdate = true;
+      terrainGeometry.computeVertexNormals();
+    }
+
+    function updateResolution() {
+      let pixelRatio = 1;
+      if (params.resolution === "Low") pixelRatio = 0.5;
+      else if (params.resolution === "Medium") pixelRatio = 1;
+      else if (params.resolution === "High") pixelRatio = 2;
+      else if (params.resolution === "Ultra") pixelRatio = 4;
+      renderer.setPixelRatio(pixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function getTerrainHeight(x, z) {
+      return Math.sin(x * params.frequency) * Math.cos(z * params.frequency) * params.terrainHeight;
+    }
+
+    // Create a text sprite for chat bubbles; scale it using uiParams.chatBubbleScale
+    function createTextSprite(message) {
+      const fontface = "Arial", fontsize = 36, borderThickness = 6;
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      context.font = fontsize + "px " + fontface;
+      const textWidth = context.measureText(message).width;
+      canvas.width = textWidth + borderThickness * 4;
+      canvas.height = fontsize * 1.5 + borderThickness * 4;
+      context.font = fontsize + "px " + fontface;
+      context.fillStyle = "rgba(255,255,255,0.8)";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.strokeStyle = "rgba(0,0,0,1.0)";
+      context.lineWidth = borderThickness;
+      context.strokeRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "rgba(0,0,0,1.0)";
+      context.fillText(message, borderThickness * 2, fontsize + borderThickness * 2);
+      const texture = new THREE.Texture(canvas);
+      texture.needsUpdate = true;
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture }));
+      sprite.scale.set((canvas.width * 0.1) * uiParams.chatBubbleScale, (canvas.height * 0.1) * uiParams.chatBubbleScale, 1);
+      return sprite;
+    }
+
+    // Create a health bar sprite; scale it using uiParams.healthBarScale
+    function createHealthBarSprite(health) {
+      const maxWidth = 50, barWidth = Math.max(0, (health / 100) * maxWidth);
+      let barColor = "green";
+      if (health <= 20) barColor = "red";
+      else if (health <= 50) barColor = "orange";
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      canvas.width = 60; 
+      canvas.height = 10;
+      ctx.fillStyle = "rgba(255,255,255,0.8)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = "black";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = barColor;
+      ctx.fillRect(1, 1, barWidth, canvas.height - 2);
+      const texture = new THREE.Texture(canvas);
+      texture.needsUpdate = true;
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture }));
+      sprite.scale.set(15 * uiParams.healthBarScale, 3 * uiParams.healthBarScale, 1);
+      return sprite;
+    }
+
+    // Chatbot class (bots are fixed in size; only UI elements are adjustable)
+    class Chatbot {
+      constructor(position) {
+        this.name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
+        const geometry = new THREE.BoxGeometry(4, 8, 4);
+        const material = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+        this.mesh = new THREE.Mesh(geometry, material);
+        // Position so that its bottom touches the terrain
+        this.mesh.position.set(position.x, position.y + 4, position.z);
+        scene.add(this.mesh);
+
+        this.chatBubble = createTextSprite("Hello! I'm " + this.name);
+        this.chatBubble.position.set(this.mesh.position.x, this.mesh.position.y + 10, this.mesh.position.z);
+        scene.add(this.chatBubble);
+
+        this.health = 100;
+        this.healthBar = createHealthBarSprite(this.health);
+        this.healthBar.position.set(this.mesh.position.x, this.mesh.position.y + 14, this.mesh.position.z);
+        scene.add(this.healthBar);
+
+        this.direction = new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
+        this.nextDirectionChange = Date.now() + Math.random() * 3000 + 2000;
+        this.isJumping = false;
+        this.jumpVelocity = 0;
+        this.nextJumpTime = Date.now() + Math.random() * chatbotParams.jumpInterval;
+        this.nextMessageTime = Date.now() + Math.random() * 3000 + 2000;
+      }
+
+      update(delta) {
+        if (this.health <= 0) return;
+        if (Date.now() > this.nextDirectionChange) {
+          this.direction.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
+          this.nextDirectionChange = Date.now() + Math.random() * 3000 + 2000;
+        }
+        const moveDistance = chatbotParams.walkSpeed * delta;
+        this.mesh.position.x += this.direction.x * moveDistance;
+        this.mesh.position.z += this.direction.z * moveDistance;
+
+        // Keep within bounds [-100, 100]
+        if (this.mesh.position.x < -100) {
+          this.mesh.position.x = -100;
+          this.direction.x = Math.abs(this.direction.x);
+        }
+        if (this.mesh.position.x > 100) {
+          this.mesh.position.x = 100;
+          this.direction.x = -Math.abs(this.direction.x);
+        }
+        if (this.mesh.position.z < -100) {
+          this.mesh.position.z = -100;
+          this.direction.z = Math.abs(this.direction.z);
+        }
+        if (this.mesh.position.z > 100) {
+          this.mesh.position.z = 100;
+          this.direction.z = -Math.abs(this.direction.z);
+        }
+
+        const groundY = getTerrainHeight(this.mesh.position.x, this.mesh.position.z);
+        if (!this.isJumping && Date.now() > this.nextJumpTime) {
+          this.isJumping = true;
+          this.jumpVelocity = chatbotParams.jumpHeight;
+        }
+        if (this.isJumping) {
+          this.mesh.position.y += this.jumpVelocity * delta;
+          this.jumpVelocity -= gravity;
+          if (this.mesh.position.y <= groundY + 4) {
+            this.mesh.position.y = groundY + 4;
+            this.isJumping = false;
+            this.nextJumpTime = Date.now() + Math.random() * chatbotParams.jumpInterval;
+          }
+        } else {
+          this.mesh.position.y = groundY + 4;
+        }
+
+        this.chatBubble.position.set(this.mesh.position.x, this.mesh.position.y + 10, this.mesh.position.z);
+        this.healthBar.position.set(this.mesh.position.x, this.mesh.position.y + 14, this.mesh.position.z);
+
+        if (!chatbotParams.meaningfulMode) {
+          if (Date.now() > this.nextMessageTime) {
+            const messages = ["Hey!", "What's up?", "Nice day!", "Let's move.", "Beep boop!"];
+            const msg = messages[Math.floor(Math.random() * messages.length)];
+            this.setChatMessage(msg);
+            this.nextMessageTime = Date.now() + Math.random() * 3000 + 2000;
+          }
+        }
+
+        if (combatParams.attackMode) {
+          this.updateCombat(delta);
+        }
+      }
+
+      updateCombat(delta) {
+        if (this.health < 50) {
+          this.direction.multiplyScalar(-1);
+          this.setChatMessage(this.name + " is retreating!");
+          return;
+        }
+        let nearestEnemy = null;
+        let minDist = Infinity;
+        for (let other of chatbots) {
+          if (other === this || other.health <= 0) continue;
+          const dist = this.mesh.position.distanceTo(other.mesh.position);
+          if (dist < minDist) {
+            minDist = dist;
+            nearestEnemy = other;
+          }
+        }
+        if (nearestEnemy) {
+          const targetDir = nearestEnemy.mesh.position.clone().sub(this.mesh.position).normalize();
+          this.direction.lerp(targetDir, 0.1).normalize();
+          if (minDist < combatParams.attackRange) {
+            nearestEnemy.takeDamage(combatParams.attackPower * delta);
+            this.setChatMessage("Attacking " + nearestEnemy.name + "!");
+          } else {
+            this.setChatMessage("Chasing " + nearestEnemy.name + "!");
+          }
+        }
+      }
+
+      takeDamage(amount) {
+        this.health -= amount;
+        if (this.health < 0) this.health = 0;
+        this.updateHealthBar();
+        if (this.health <= 0) {
+          this.setChatMessage(this.name + " has been defeated!");
+        }
+      }
+
+      setChatMessage(message) {
+        scene.remove(this.chatBubble);
+        this.chatBubble = createTextSprite(message);
+        this.chatBubble.position.set(this.mesh.position.x, this.mesh.position.y + 10, this.mesh.position.z);
+        scene.add(this.chatBubble);
+      }
+
+      updateHealthBar() {
+        scene.remove(this.healthBar);
+        this.healthBar = createHealthBarSprite(this.health);
+        this.healthBar.position.set(this.mesh.position.x, this.mesh.position.y + 14, this.mesh.position.z);
+        scene.add(this.healthBar);
+      }
+
+      dispose() {
+        scene.remove(this.mesh);
+        scene.remove(this.chatBubble);
+        scene.remove(this.healthBar);
+        this.mesh.geometry.dispose();
+        this.mesh.material.dispose();
+      }
+    }
+
+    function updateUIScales() {
+      chatbots.forEach(bot => {
+        // Update chat bubble scale if image is loaded
+        const tbImage = bot.chatBubble.material.map.image;
+        if (tbImage) {
+          bot.chatBubble.scale.set((tbImage.width * 0.1) * uiParams.chatBubbleScale,
+                                   (tbImage.height * 0.1) * uiParams.chatBubbleScale,
+                                   1);
+        }
+        // Update health bar scale (we expect it to be 15x3 originally)
+        bot.healthBar.scale.set(15 * uiParams.healthBarScale, 3 * uiParams.healthBarScale, 1);
+      });
+    }
+
+    function spawnChatbots() {
+      removeChatbots();
+      const count = 3;
+      for (let i = 0; i < count; i++) {
+        const x = Math.random() * 160 - 80;
+        const z = Math.random() * 160 - 80;
+        const y = getTerrainHeight(x, z);
+        const bot = new Chatbot(new THREE.Vector3(x, y, z));
+        chatbots.push(bot);
+      }
+    }
+
+    function removeChatbots() {
+      chatbots.forEach(bot => bot.dispose());
+      chatbots = [];
+    }
+
+    function handlePlayerMessage(msg) {
+      if (!msg || msg.trim() === "") return;
+      let mentionedBot = null;
+      for (let bot of chatbots) {
+        if (msg.toLowerCase().includes(bot.name.toLowerCase())) {
+          mentionedBot = bot;
+          break;
+        }
+      }
+      if (mentionedBot) {
+        mentionedBot.setChatMessage(mentionedBot.name + " says: I hear you, player!");
+      } else {
+        chatbots.forEach(bot => {
+          bot.setChatMessage(bot.name + " says: Hello, player!");
+        });
+      }
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const currentTime = Date.now();
+      const delta = (currentTime - lastTime) / 1000;
+      lastTime = currentTime;
+
+      chatbots.forEach(bot => { if (bot.health > 0) bot.update(delta); });
+
+      if (params.chatbotsEnabled && chatbotParams.meaningfulMode && chatbots.length > 0) {
+        if (Date.now() > conversationTimer) {
+          const bot = chatbots[conversationIndex % chatbots.length];
+          if (bot.health > 0) {
+            const msg = conversationScript[conversationIndex % conversationScript.length];
+            bot.setChatMessage(bot.name + ": " + msg);
+          }
+          conversationIndex++;
+          conversationTimer = Date.now() + 4000;
+        }
+      }
+      renderer.render(scene, camera);
+    }
+
+    init();
+    animate();
+  </script>
+</body>
+</html>
